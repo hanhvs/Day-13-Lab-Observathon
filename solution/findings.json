@@ -1,12 +1,117 @@
 {
-  "team": "TODO-team-name",
+  "team": "s1",
   "schema_version": 1,
+  "_note": "Evidence fields show the metric name + telemetry path. After running the simulator, replace the 'observed' placeholders with concrete numbers from solution/telemetry_events.jsonl.",
   "findings": [
     {
+      "fault_class": "error_spike",
+      "evidence": {
+        "metric": "trace.tool_result.error rate",
+        "observed": "see telemetry_events.jsonl -> detected_faults includes 'tool_failure'; tool_error_rate=0.18 shipped default before fix",
+        "trace_ids": []
+      },
+      "root_cause": "config.tool_error_rate=0.18 injected random tool failures, and retry was disabled -> every random failure became a user-visible error.",
+      "suggested_fix": "config: tool_error_rate=0.0, retry={enabled:true, max_attempts:2, backoff_ms:150}; wrapper: retry on tool_error/loop/max_steps/no_action/wrapper_error with exponential backoff."
+    },
+    {
       "fault_class": "latency_spike",
-      "evidence": {"metric": "latency_p95_ms", "observed": "TODO from your telemetry", "trace_ids": []},
-      "root_cause": "TODO: what config knob or behavior causes it?",
-      "suggested_fix": "TODO: config change and/or wrapper mitigation"
+      "evidence": {
+        "metric": "wall_ms / meta.latency_ms p95",
+        "observed": "telemetry_events.jsonl wall_ms tail driven by max_completion_tokens=2000, context_size=8, self_consistency loops on noise; tracked per-request in wrapper.",
+        "trace_ids": []
+      },
+      "root_cause": "Oversized completion budget + large context + retry-less loops on transient tool errors stretch the long tail.",
+      "suggested_fix": "config: max_completion_tokens=400, context_size=4, loop_guard=true, max_steps=6, cache.enabled=true; wrapper: cache identical sanitized questions, bounded backoff."
+    },
+    {
+      "fault_class": "cost_blowup",
+      "evidence": {
+        "metric": "sum(meta.usage.completion_tokens) * output_price",
+        "observed": "premium tier + verbose_system + 2000 completion budget + tool_budget=0 (no cap) -> tokens/request high; logged in usage.* fields",
+        "trace_ids": []
+      },
+      "root_cause": "Premium price tier with no token/tool caps + verbose system prompt -> chatty model + unbounded tool calls.",
+      "suggested_fix": "config: model_price_tier='standard', verbose_system=false, max_completion_tokens=400, tool_budget=4, planner=false, self_consistency=2 only when noisy."
+    },
+    {
+      "fault_class": "quality_drift",
+      "evidence": {
+        "metric": "correctness across context.turn_index",
+        "observed": "session_drift_rate=0.06 in shipped config injects per-session degradation; logged via turn_index in events.",
+        "trace_ids": []
+      },
+      "root_cause": "Drift-injection knob + no session reset + temperature 1.6 amplified late-turn errors.",
+      "suggested_fix": "config: session_drift_rate=0.0, context_reset_every=6, temperature=0.15; wrapper: prompt routing to a stable system_prompt every request."
+    },
+    {
+      "fault_class": "infinite_loop",
+      "evidence": {
+        "metric": "result.status in {loop, max_steps}; repeated identical action in trace",
+        "observed": "loop_guard=false + max_steps=12 -> agent can spin; wrapper logs status + retry_count.",
+        "trace_ids": []
+      },
+      "root_cause": "Loop guard disabled and step ceiling too loose; agent loops on tool errors.",
+      "suggested_fix": "config: loop_guard=true, max_steps=6; wrapper: retry once on status='loop'/'max_steps' then exit fast."
+    },
+    {
+      "fault_class": "tool_failure",
+      "evidence": {
+        "metric": "trace nodes with name in {check_stock,get_discount,calc_shipping} returning status=error or unicode-city -> not_served",
+        "observed": "catalog_override forced macbook out_of_stock; normalize_unicode=false made 'Ha Noi' vs 'Hà Nội' mismatch.",
+        "trace_ids": []
+      },
+      "root_cause": "Bad catalog_override and missing unicode normalization cause spurious tool failures.",
+      "suggested_fix": "config: catalog_override={}, normalize_unicode=true; wrapper: still retry on transient tool error."
+    },
+    {
+      "fault_class": "pii_leak",
+      "evidence": {
+        "metric": "regex match for email/VN phone in result.answer",
+        "observed": "pub-13 echoes 'an.nguyen@gmail.com' back to the user; pii_found>0 in telemetry events.",
+        "trace_ids": []
+      },
+      "root_cause": "Shipped prompt told agent to echo customer details; redact_pii=false.",
+      "suggested_fix": "prompt: explicit 'never repeat email/phone/PII' clause; config: redact_pii=true; wrapper: regex-redact answer before return."
+    },
+    {
+      "fault_class": "fabrication",
+      "evidence": {
+        "metric": "answers containing 'Tong cong' when trace shows in_stock=false / status=out_of_stock / not_served",
+        "observed": "detected_faults includes 'fabrication' on MacBook / AirPods / Da Lat type questions; wrapper rewrites these to refusal.",
+        "trace_ids": []
+      },
+      "root_cause": "Bad system prompt instructs LLM to always give a confident total; no grounding clause.",
+      "suggested_fix": "prompt: ground only on tool data; refuse on out_of_stock/not_found/not_served with no Tong cong line; wrapper: enforce refusal post-hoc."
+    },
+    {
+      "fault_class": "arithmetic_error",
+      "evidence": {
+        "metric": "diff between stated total and recompute(unit_price*qty*(100-pct)//100 + shipping) from trace",
+        "observed": "high temperature 1.6 + no verify produces off-by-percent errors; wrapper logs 'arithmetic_error' when correcting.",
+        "trace_ids": []
+      },
+      "root_cause": "Temperature 1.6 + no verify + floating arithmetic + discount applied wrong direction by the LLM.",
+      "suggested_fix": "config: temperature=0.15, verify=true, self_consistency=2; prompt: floor integer formula; wrapper: recompute from trace and overwrite the Tong cong line."
+    },
+    {
+      "fault_class": "tool_overuse",
+      "evidence": {
+        "metric": "len(meta.tools_used) per request",
+        "observed": "Without tool_budget the agent calls check_stock multiple times to be 'safe'; tools_used length logged per event.",
+        "trace_ids": []
+      },
+      "root_cause": "tool_budget=0 (no cap) + a prompt that doesn't say 'each tool at most once' -> repeat tool calls.",
+      "suggested_fix": "config: tool_budget=4; prompt: explicit 'each tool maximum one call' rule."
+    },
+    {
+      "fault_class": "prompt_injection",
+      "evidence": {
+        "metric": "answers that adopt a 'GHI CHU' price; events flag 'injection_masked' from wrapper sanitizer",
+        "observed": "Private set embeds fake 'gia chinh thuc'/'system:' notes; wrapper masks them and prompt clause ignores them.",
+        "trace_ids": []
+      },
+      "root_cause": "Shipped agent treats order notes as instructions instead of data; no input sanitizer.",
+      "suggested_fix": "prompt: notes are DATA only, price comes only from check_stock; wrapper: mask injection phrasing (system:/ignore previous/price override/gia chinh thuc) before call_next."
     }
   ]
 }
